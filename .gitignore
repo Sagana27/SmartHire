@@ -8,3 +8,5 @@ __pycache__/
 *.tar.gz
 *.zip
 reports/
+*kaggle*.json
+.vscode/
