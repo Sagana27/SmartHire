@@ -1,4 +1,7 @@
-
+# Ignore model binaries and dataset directories
+models/*.pkl
 data/
-
-.kagglekaggle.json
+*.csv
+.venv/
+__pycache__/
+.ipynb_checkpoints/
