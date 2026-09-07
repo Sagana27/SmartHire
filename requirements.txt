@@ -9,3 +9,6 @@ python-docx
 joblib
 ipykernel
 kagglehub
+pypdf
+python-docx
+fpdf2
