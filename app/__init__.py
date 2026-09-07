@@ -1,0 +1,1 @@
+"""SmartHire Streamlit application package."""
