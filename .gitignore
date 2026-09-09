@@ -1,5 +1,4 @@
 # Ignore model binaries and dataset directories
-models/*.pkl
 data/
 *.csv
 .venv/
