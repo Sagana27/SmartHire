@@ -10,3 +10,4 @@ reports/
 *kaggle*.json
 .vscode/
 *.pdf
+data/raw/
