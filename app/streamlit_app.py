@@ -16,13 +16,13 @@ st.set_page_config(page_title="SmartHire | AI Recruitment Platform", layout="wid
 # Cached resource loaders
 @st.cache_resource
 def load_models_and_data():
-    models_dir = Path("models")
+    models_dir = Path(__file__).resolve().parent.parent / "models"
     if not models_dir.exists():
-        models_dir = Path("../models")
+        models_dir = Path(__file__).resolve().parent.parent / "models"
 
-    data_dir = Path("data/processed")
+    data_dir = Path(__file__).resolve().parent.parent / "data" / "processed"
     if not data_dir.exists():
-        data_dir = Path("../data/processed")
+        data_dir = Path(__file__).resolve().parent.parent / "data" / "processed"
 
     clf = joblib.load(models_dir / "classifier.pkl")
     clf_tfidf = joblib.load(models_dir / "tfidf_vectorizer.pkl")
