@@ -7,27 +7,27 @@ from sklearn.metrics.pairwise import cosine_similarity
 import pypdf
 import docx
 
-# Page configuration
 st.set_page_config(
     page_title="SmartHire | Intelligent Resume Screener",
     page_icon="💼",
     layout="wide"
 )
 
-# Robust path handling
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 DATA_DIR = BASE_DIR / "data" / "processed"
 
 def extract_text(file):
-    """Extract clean text from PDF or DOCX uploads."""
     text = ""
-    if file.name.endswith(".pdf"):
-        reader = pypdf.PdfReader(file)
-        text = " ".join([page.extract_text() or "" for page in reader.pages])
-    elif file.name.endswith(".docx"):
-        doc = docx.Document(file)
-        text = " ".join([p.text for p in doc.paragraphs])
+    try:
+        if file.name.endswith(".pdf"):
+            reader = pypdf.PdfReader(file)
+            text = " ".join([page.extract_text() or "" for page in reader.pages])
+        elif file.name.endswith(".docx"):
+            doc = docx.Document(file)
+            text = " ".join([p.text for p in doc.paragraphs])
+    except Exception as e:
+        st.error(f"Error parsing {file.name}: {e}")
     return text.strip()
 
 @st.cache_resource
@@ -51,80 +51,79 @@ except Exception as e:
     st.error(f"Error loading models or datasets: {e}")
     st.stop()
 
-# Header
-st.title("💼 SmartHire: Intelligent Recruitment & Analytics")
-st.markdown("Automated resume domain classification, job matching, and candidate readiness scoring.")
+st.title("💼 SmartHire: Multi-Resume Screener & Matcher")
+st.markdown("Automated batch resume screening, domain classification, and candidate job matching.")
 
-# Sidebar Settings
 with st.sidebar:
     st.header("⚙️ Matching Parameters")
-    top_k = st.slider("Number of Job Recommendations", min_value=1, max_value=15, value=5)
+    top_k = st.slider("Top Recommendations Per Candidate", min_value=1, max_value=10, value=3)
     min_score = st.slider("Minimum Match Threshold (%)", min_value=0, max_value=100, value=15, step=5)
     st.divider()
-    st.caption("SmartHire ML Engine • TF-IDF & MultinomialNB / Cosine Sim")
+    st.caption("SmartHire ML Engine • TF-IDF + Classifier & Cosine Similarity")
 
-# Main dual-column layout
-col1, col2 = st.columns([1.1, 1], gap="large")
+col1, col2 = st.columns([1, 1.2], gap="large")
 
 with col1:
-    st.subheader("📄 Candidate Profile Input")
-    uploaded_file = st.file_uploader("Upload candidate resume", type=["pdf", "docx"])
-    
-    manual_input = st.text_area(
-        "Or paste resume text / qualifications directly:",
-        height=200,
-        placeholder="e.g., Data Scientist with experience in Python, SQL, Pandas, Scikit-Learn, and Machine Learning..."
+    st.subheader("📄 Candidate Upload")
+    uploaded_files = st.file_uploader(
+        "Upload one or more resumes (PDF / DOCX)",
+        type=["pdf", "docx"],
+        accept_multiple_files=True
     )
     
-    resume_content = ""
-    if uploaded_file is not None:
-        resume_content = extract_text(uploaded_file)
-        st.success(f"Attached file: {uploaded_file.name} ({len(resume_content.split())} words parsed)")
-    elif manual_input.strip():
-        resume_content = manual_input.strip()
+    manual_input = st.text_area(
+        "Or paste resume text for a single candidate:",
+        height=140,
+        placeholder="Paste candidate skills, experience, or qualifications..."
+    )
 
-    run_btn = st.button("🚀 Analyze Profile & Match Jobs", type="primary", use_container_width=True)
+    run_btn = st.button("🚀 Screen All Resumes", type="primary", use_container_width=True)
 
 with col2:
-    st.subheader("📊 Evaluation & Role Matches")
+    st.subheader("📊 Screening Results")
     if run_btn:
-        if not resume_content:
-            st.warning("Please upload a resume file or paste qualifications to begin analysis.")
-        else:
-            with st.spinner("Processing text and running inference..."):
-                # Classification
-                text_vec = clf_tfidf.transform([resume_content])
-                predicted_role = clf.predict(text_vec)[0]
-                
-                # Confidence score
-                confidence = None
-                if hasattr(clf, "predict_proba"):
-                    probs = clf.predict_proba(text_vec)[0]
-                    confidence = float(np.max(probs) * 100)
-
-                # Metrics card
-                m1, m2 = st.columns(2)
-                m1.metric("Predicted Domain", predicted_role)
-                m2.metric("Classifier Confidence", f"{confidence:.1f}%" if confidence else "N/A")
-
-                # Cosine Similarity for Job Recommendation
-                r_vec = rec_tfidf.transform([resume_content])
-                similarity_scores = cosine_similarity(r_vec, job_matrix).flatten()
-                
-                top_indices = similarity_scores.argsort()[::-1][:top_k]
-                results = []
-                for idx in top_indices:
-                    sim_pct = similarity_scores[idx] * 100
-                    if sim_pct >= min_score:
-                        results.append({
-                            "Job Title": jobs.iloc[idx].get("title", jobs.iloc[idx].get("job_title", "Position")),
-                            "Category": jobs.iloc[idx].get("category", "General"),
-                            "Match Score": f"{sim_pct:.1f}%",
-                            "Description": jobs.iloc[idx].get("job_description", "")[:120] + "..."
-                        })
-
-                st.markdown("### Top Matched Job Openings")
-                if results:
-                    st.dataframe(pd.DataFrame(results), use_container_width=True)
+        candidates = []
+        
+        if uploaded_files:
+            for f in uploaded_files:
+                txt = extract_text(f)
+                if txt:
+                    candidates.append({"name": f.name, "text": txt})
                 else:
-                    st.info("No available jobs exceeded your current minimum match score threshold.")
+                    st.warning(f"Could not extract text from {f.name}")
+        elif manual_input.strip():
+            candidates.append({"name": "Manual Entry Candidate", "text": manual_input.strip()})
+
+        if not candidates:
+            st.warning("Please upload at least one resume file or paste text.")
+        else:
+            with st.spinner(f"Processing {len(candidates)} resume(s)..."):
+                batch_summary = []
+                
+                for cand in candidates:
+                    # 1. Classification & Confidence
+                    vec = clf_tfidf.transform([cand["text"]])
+                    pred_role = clf.predict(vec)[0]
+                    confidence = float(np.max(clf.predict_proba(vec)[0]) * 100) if hasattr(clf, "predict_proba") else None
+                    
+                    # 2. Recommendations
+                    r_vec = rec_tfidf.transform([cand["text"]])
+                    sim_scores = cosine_similarity(r_vec, job_matrix).flatten()
+                    top_idx = sim_scores.argsort()[::-1][:top_k]
+                    
+                    matched_roles = []
+                    for idx in top_idx:
+                        pct = sim_scores[idx] * 100
+                        if pct >= min_score:
+                            title = jobs.iloc[idx].get("title", jobs.iloc[idx].get("job_title", "Position"))
+                            matched_roles.append(f"{title} ({pct:.1f}%)")
+                    
+                    batch_summary.append({
+                        "Candidate / File": cand["name"],
+                        "Predicted Domain": pred_role,
+                        "Confidence": f"{confidence:.1f}%" if confidence else "N/A",
+                        "Top Matches": ", ".join(matched_roles) if matched_roles else "No match above threshold"
+                    })
+
+                st.markdown(f"### Processed **{len(candidates)}** Candidate(s)")
+                st.dataframe(pd.DataFrame(batch_summary), use_container_width=True)
