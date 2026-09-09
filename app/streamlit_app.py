@@ -11,7 +11,7 @@ from scipy.stats import entropy
 from sklearn.metrics.pairwise import cosine_similarity
 import io
 
-st.set_page_config(page_title="SmartHire Screening & Recommendation", layout="wide")
+st.set_page_config(page_title="SmartHire Candidate Screening", layout="wide")
 
 MODELS_DIR = Path("models")
 DATA_DIR = Path("data/processed")
@@ -47,12 +47,10 @@ def extract_text_from_upload(uploaded_file) -> str:
     name = uploaded_file.name.lower()
     if name.endswith(".pdf"):
         reader = PdfReader(uploaded_file)
-        return "
-".join([p.extract_text() or "" for p in reader.pages]).strip()
+        return "\n".join([p.extract_text() or "" for p in reader.pages]).strip()
     elif name.endswith(".docx"):
         doc = Document(uploaded_file)
-        return "
-".join([p.text for p in doc.paragraphs]).strip()
+        return "\n".join([p.text for p in doc.paragraphs]).strip()
     elif name.endswith(".txt"):
         return uploaded_file.read().decode("utf-8", errors="ignore").strip()
     return ""
@@ -137,7 +135,7 @@ if uploaded_files:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False)
-            
+
             st.download_button(
                 label="Download SmartHire_Batch_Rankings.xlsx",
                 data=buffer.getvalue(),
