@@ -1,198 +1,146 @@
-from pathlib import Path
+import os
 import re
-import io
-import streamlit as st
-import pandas as pd
-import numpy as np
+from pathlib import Path
 import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
+from pypdf import PdfReader
+from docx import Document
 from scipy.stats import entropy
 from sklearn.metrics.pairwise import cosine_similarity
-import pypdf
-import docx
+import io
 
-st.set_page_config(
-    page_title="SmartHire | Shortlist Decision Matrix",
-    page_icon="💼",
-    layout="wide"
-)
+st.set_page_config(page_title="SmartHire Screening & Recommendation", layout="wide")
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-MODELS_DIR = BASE_DIR / "models"
-DATA_DIR = BASE_DIR / "data" / "processed"
+MODELS_DIR = Path("models")
+DATA_DIR = Path("data/processed")
 
-# Exact historical 20-skill pool
-CORE_SKILLS_POOL = [
-    "aws", "deep learning", "docker", "git", "hadoop", "java", "kubernetes",
-    "machine learning", "nlp", "numpy", "pandas", "python", "pytorch",
-    "r", "spark", "spring boot", "sql", "statistics", "tableau", "tensorflow"
+GLOBAL_TECH_SKILLS = [
+    "python", "r", "sql", "machine learning", "deep learning", "nlp",
+    "data analysis", "pandas", "numpy", "scikit-learn", "tensorflow", "pytorch",
+    "tableau", "power bi", "matplotlib", "seaborn", "statistics", "aws",
+    "docker", "kubernetes", "git", "spark", "hadoop", "excel", "java", "spring boot"
 ]
-MAX_EXPECTED_SKILLS = 26
-
-def extract_text(file):
-    text = ""
-    try:
-        if file.name.endswith(".pdf"):
-            reader = pypdf.PdfReader(file)
-            text = " ".join([page.extract_text() or "" for page in reader.pages])
-        elif file.name.endswith(".docx"):
-            doc = docx.Document(file)
-            text = " ".join([p.text for p in doc.paragraphs])
-    except Exception as e:
-        st.error(f"Error parsing {file.name}: {e}")
-    return text.strip()
-
-def extract_skills(text):
-    text_lower = text.lower()
-    found = [s.title() for s in CORE_SKILLS_POOL if re.search(r'\b' + re.escape(s) + r'\b', text_lower)]
-    return sorted(list(set(found)))
 
 @st.cache_resource
-def load_resources():
+def load_artifacts():
     clf = joblib.load(MODELS_DIR / "classifier.pkl")
-    clf_tfidf = joblib.load(MODELS_DIR / "clf_tfidf.pkl")
-    rec_tfidf = joblib.load(MODELS_DIR / "rec_tfidf.pkl")
-    
-    jobs = pd.read_csv(DATA_DIR / "jobs_clean.csv")
-    if "text" not in jobs.columns:
-        desc = next((c for c in ['job_description', 'clean_job_description'] if c in jobs.columns), jobs.columns[-1])
-        title = next((c for c in ['job_title', 'title'] if c in jobs.columns), jobs.columns[0])
-        jobs["text"] = jobs[title].astype(str) + " " + jobs[desc].astype(str)
-        
-    job_matrix = rec_tfidf.transform(jobs["text"].fillna(""))
-    return clf, clf_tfidf, rec_tfidf, jobs, job_matrix
+    tfidf = joblib.load(MODELS_DIR / "tfidf_vectorizer.pkl")
+    rec_tfidf = joblib.load(MODELS_DIR / "job_tfidf_vectorizer.pkl")
+    df_jobs = pd.read_csv(DATA_DIR / "jobs_clean.csv")
+    rec_job_col = "clean_job_text" if "clean_job_text" in df_jobs.columns else "text"
+    job_tfidf_vectors = rec_tfidf.transform(df_jobs[rec_job_col].fillna("").astype(str))
+    return clf, tfidf, rec_tfidf, df_jobs, job_tfidf_vectors
 
-try:
-    clf, clf_tfidf, rec_tfidf, jobs, job_matrix = load_resources()
-except Exception as e:
-    st.error(f"Error loading models or datasets: {e}")
-    st.stop()
+classifier, tfidf, rec_tfidf, df_jobs, job_tfidf_vectors = load_artifacts()
+classes = classifier.classes_
+max_entropy = float(np.log2(len(classes)))
 
-st.title("💼 SmartHire: Shortlist Decision Matrix")
-st.caption("Batch parsing, domain entropy calculation, candidate readiness tiering, and Excel decision matrix generation.")
+def clean_text(text: str) -> str:
+    text = re.sub(r"http\S+\s*", " ", text)
+    text = re.sub(r"[@#]\S+", " ", text)
+    text = re.sub(r"[^A-Za-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-with st.sidebar:
-    st.header("⚙️ Evaluation Parameters")
-    interview_threshold = st.slider("Interview Probability Threshold (%)", 30, 90, 60, step=5)
-    upskill_threshold = st.slider("Upskill Pipeline Threshold (%)", 20, 60, 40, step=5)
-    st.divider()
-    st.write(f"• Indexed Database Roles: **{len(jobs)}**")
-    st.write(f"• Active Skills Pool: **{len(CORE_SKILLS_POOL)} terms**")
+def extract_text_from_upload(uploaded_file) -> str:
+    name = uploaded_file.name.lower()
+    if name.endswith(".pdf"):
+        reader = PdfReader(uploaded_file)
+        return "
+".join([p.extract_text() or "" for p in reader.pages]).strip()
+    elif name.endswith(".docx"):
+        doc = Document(uploaded_file)
+        return "
+".join([p.text for p in doc.paragraphs]).strip()
+    elif name.endswith(".txt"):
+        return uploaded_file.read().decode("utf-8", errors="ignore").strip()
+    return ""
 
-uploaded_files = st.file_uploader(
-    "Upload Candidate Resumes (PDF / DOCX)",
-    type=["pdf", "docx"],
-    accept_multiple_files=True
-)
+def extract_skills(text: str) -> set:
+    found = set()
+    cleaned = text.lower()
+    for s in GLOBAL_TECH_SKILLS:
+        if re.search(r"\b" + re.escape(s) + r"\b", cleaned):
+            found.add(s)
+    return found
 
-if st.button("🚀 Generate Shortlist Decision Matrix", type="primary", use_container_width=True):
-    if not uploaded_files:
-        st.warning("Please upload one or more resumes to evaluate.")
+def calculate_entropy(probabilities: np.ndarray) -> float:
+    valid_probs = probabilities[probabilities > 0]
+    return float(entropy(valid_probs, base=2))
+
+def evaluate_candidate(domain_p: float, readiness: float, sim: float):
+    prob = (0.45 * domain_p) + (0.35 * readiness) + (0.20 * sim)
+    prob = float(np.clip(prob, 0.0, 99.9))
+    if prob >= 75.0:
+        status, action = "Strong Contender", "Fast-track to Technical Interview"
+    elif prob >= 55.0:
+        status, action = "High-Potential Pivot", "Schedule Phone Screening"
+    elif prob >= 40.0:
+        status, action = "Upskill Candidate", "Retain for Associate Pipeline"
     else:
-        matrix_rows = []
-        with st.spinner(f"Evaluating {len(uploaded_files)} candidate resumes..."):
-            for f in uploaded_files:
-                txt = extract_text(f)
-                if not txt:
-                    continue
-                
-                # 1. Classification & Domain Certainties
-                vec = clf_tfidf.transform([txt])
-                if hasattr(clf, "predict_proba"):
-                    probs = clf.predict_proba(vec)[0]
-                    classes = clf.classes_
-                    sorted_indices = np.argsort(probs)[::-1]
-                    
-                    p_domain = classes[sorted_indices[0]]
-                    p_cert = float(probs[sorted_indices[0]] * 100)
-                    
-                    r_domain = classes[sorted_indices[1]] if len(classes) > 1 else "N/A"
-                    r_cert = float(probs[sorted_indices[1]] * 100) if len(classes) > 1 else 0.0
-                    
-                    clean_probs = probs[probs > 0]
-                    shannon_ent = float(entropy(clean_probs, base=2))
-                else:
-                    pred = clf.predict(vec)[0]
-                    p_domain, p_cert, r_domain, r_cert, shannon_ent = pred, 50.0, "N/A", 0.0, 1.0
+        status, action = "Out of Scope", "Archive Profile"
+    return round(prob, 2), status, action
 
-                # 2. Skill Extraction & Readiness Score (Denominator = 26)
-                skills = extract_skills(txt)
-                skills_cnt = len(skills)
-                readiness_score = round(min((skills_cnt / MAX_EXPECTED_SKILLS) * 100, 100.0), 2)
-                
-                # Specialization Index (%)
-                spec_index = round(abs(p_cert - r_cert), 1)
+st.title("SmartHire Candidate Screening & Batch Decision Matrix")
 
-                # 3. Job Recommendation Match Score
-                r_vec = rec_tfidf.transform([txt])
-                sims = cosine_similarity(r_vec, job_matrix).flatten()
-                best_job_idx = int(sims.argsort()[::-1][0])
-                top_job_title = jobs.iloc[best_job_idx].get("title", jobs.iloc[best_job_idx].get("job_title", "General Role"))
-                job_match_score = round(float(sims[best_job_idx] * 100), 2)
+uploaded_files = st.file_uploader("Upload Resumes (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-                # 4. Original Fitted Weights: 0.45*Certainty + 0.35*Readiness + 0.20*Match
-                shortlist_prob = round((0.45018 * p_cert) + (0.34998 * readiness_score) + (0.19993 * job_match_score), 2)
-                
-                # Candidate Tier based on readiness
-                if readiness_score >= 55.0:
-                    tier = "Tier 1 (High)"
-                elif readiness_score >= 35.0:
-                    tier = "Tier 2 (Mid)"
-                else:
-                    tier = "Tier 3 (Developing)"
+if uploaded_files:
+    if st.button("Generate Shortlist Decision Matrix"):
+        records = []
+        for file in uploaded_files:
+            raw = extract_text_from_upload(file)
+            if not raw:
+                continue
+            cleaned = clean_text(raw)
+            res_vec = tfidf.transform([cleaned])
+            probs = classifier.predict_proba(res_vec)[0]
+            domain = classifier.predict(res_vec)[0]
+            domain_p = float(np.max(probs)) * 100
+            entropy_val = calculate_entropy(probs)
+            spec_idx = max(0.0, (1.0 - (entropy_val / max_entropy)) * 100)
 
-                # Decision Statuses
-                if shortlist_prob >= interview_threshold:
-                    cand_status = "Interview Candidate"
-                    rec_action = "Schedule Technical Screening"
-                elif shortlist_prob >= upskill_threshold:
-                    cand_status = "Upskill Candidate"
-                    rec_action = "Retain for Associate Pipeline"
-                else:
-                    cand_status = "Out of Scope"
-                    rec_action = "Archive Profile"
+            skills = extract_skills(cleaned)
+            readiness = (len(skills) / len(GLOBAL_TECH_SKILLS)) * 100
 
-                matrix_rows.append({
-                    "Filename": f.name,
-                    "Status": "Success",
-                    "Shortlist Probability (%)": shortlist_prob,
-                    "Candidate Status": cand_status,
-                    "Recommended Action": rec_action,
-                    "Primary Domain": p_domain,
-                    "Domain Certainty (%)": round(p_cert, 2),
-                    "Runner-up Domain": r_domain,
-                    "Runner-up Certainty (%)": round(r_cert, 2),
-                    "Shannon Entropy (bits)": round(shannon_ent, 2),
-                    "Specialization Index (%)": spec_index,
-                    "Readiness Score (%)": readiness_score,
-                    "Candidate Tier": tier,
-                    "Skills Count": skills_cnt,
-                    "Identified Skills": ", ".join(skills),
-                    "Top Matched Job": top_job_title,
-                    "Job Match Score (%)": job_match_score
-                })
+            cand_job_vec = rec_tfidf.transform([cleaned])
+            sims = cosine_similarity(cand_job_vec, job_tfidf_vectors).flatten()
+            top_idx = sims.argmax()
+            top_score = round(float(sims[top_idx]) * 100, 2)
+            top_job = df_jobs.iloc[top_idx].get("title", "Not Specified")
 
-        df_matrix = pd.DataFrame(matrix_rows)
+            p_shortlist, status, action = evaluate_candidate(domain_p, readiness, top_score)
 
-        # 5. Cohort Percentile Ranking
-        if not df_matrix.empty:
-            df_matrix = df_matrix.sort_values(by="Shortlist Probability (%)", ascending=False).reset_index(drop=True)
-            n_cands = len(df_matrix)
-            percentiles = [f"Top {int(np.ceil(((i + 1) / n_cands) * 4) * 25)}%" for i in range(n_cands)]
-            df_matrix["Cohort Percentile"] = percentiles
+            records.append({
+                "Filename": file.name,
+                "Shortlist Probability (%)": p_shortlist,
+                "Verdict": status,
+                "Recommended Action": action,
+                "Primary Domain": domain,
+                "Domain Certainty (%)": round(domain_p, 2),
+                "Specialization Index (%)": round(spec_idx, 1),
+                "Taxonomy Coverage (%)": round(readiness, 2),
+                "Skills Count": len(skills),
+                "Identified Skills": ", ".join(sorted([s.title() for s in skills])),
+                "Top Role Match": top_job,
+                "Role Similarity (%)": top_score
+            })
 
-            st.subheader("📋 Decision Matrix Preview")
-            st.dataframe(df_matrix, use_container_width=True)
+        if records:
+            df = pd.DataFrame(records).sort_values(by="Shortlist Probability (%)", ascending=False).reset_index(drop=True)
+            df["Cohort Percentile"] = [f"Top {max(1, int(round((i + 1) / len(df) * 100)))}%" for i in range(len(df))]
 
-            excel_buffer = io.BytesIO()
-            with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-                df_matrix.to_excel(writer, index=False, sheet_name="Shortlist_Rankings")
-            excel_data = excel_buffer.getvalue()
+            st.subheader("Shortlist Decision Matrix")
+            st.dataframe(df, use_container_width=True)
 
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+            
             st.download_button(
-                label="📥 Download SmartHire_Shortlist_Decision_Matrix.xlsx",
-                data=excel_data,
-                file_name="SmartHire_Shortlist_Decision_Matrix.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
+                label="Download SmartHire_Batch_Rankings.xlsx",
+                data=buffer.getvalue(),
+                file_name="SmartHire_Batch_Rankings.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
