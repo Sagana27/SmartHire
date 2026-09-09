@@ -1,3 +1,9 @@
+from pathlib import Path
+import os
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODELS_DIR = BASE_DIR / "models"
+DATA_DIR = BASE_DIR / "data" / "processed"
 import streamlit as st
 import pandas as pd
 import joblib
