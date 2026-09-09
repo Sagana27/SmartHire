@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,14 +9,21 @@ import pypdf
 import docx
 
 st.set_page_config(
-    page_title="SmartHire | Intelligent Resume Screener",
-    page_icon="💼",
+    page_title="SmartHire | AI Recruitment & Screening",
+    page_icon="🎯",
     layout="wide"
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 DATA_DIR = BASE_DIR / "data" / "processed"
+
+CORE_SKILLS = [
+    "python", "java", "c++", "c#", "sql", "nosql", "pandas", "numpy", 
+    "scikit-learn", "deep learning", "machine learning", "nlp", "transformers", 
+    "aws", "azure", "docker", "kubernetes", "ci/cd", "linux", "git", 
+    "selenium", "pytest", "jira", "spring boot", "react", "tableau"
+]
 
 def extract_text(file):
     text = ""
@@ -30,6 +38,11 @@ def extract_text(file):
         st.error(f"Error parsing {file.name}: {e}")
     return text.strip()
 
+def detect_skills(text):
+    text_lower = text.lower()
+    found = [s.title() for s in CORE_SKILLS if re.search(r'\b' + re.escape(s) + r'\b', text_lower)]
+    return found[:8]
+
 @st.cache_resource
 def load_resources():
     clf = joblib.load(MODELS_DIR / "classifier.pkl")
@@ -38,9 +51,9 @@ def load_resources():
     
     jobs = pd.read_csv(DATA_DIR / "jobs_clean.csv")
     if "text" not in jobs.columns:
-        desc_col = next((c for c in ['job_description', 'clean_job_description', 'description'] if c in jobs.columns), jobs.columns[-1])
-        title_col = next((c for c in ['job_title', 'title'] if c in jobs.columns), jobs.columns[0])
-        jobs["text"] = jobs[title_col].astype(str) + " " + jobs[desc_col].astype(str)
+        desc = next((c for c in ['job_description', 'clean_job_description'] if c in jobs.columns), jobs.columns[-1])
+        title = next((c for c in ['job_title', 'title'] if c in jobs.columns), jobs.columns[0])
+        jobs["text"] = jobs[title].astype(str) + " " + jobs[desc].astype(str)
         
     job_matrix = rec_tfidf.transform(jobs["text"].fillna(""))
     return clf, clf_tfidf, rec_tfidf, jobs, job_matrix
@@ -51,79 +64,105 @@ except Exception as e:
     st.error(f"Error loading models or datasets: {e}")
     st.stop()
 
-st.title("💼 SmartHire: Multi-Resume Screener & Matcher")
-st.markdown("Automated batch resume screening, domain classification, and candidate job matching.")
+st.title("🎯 SmartHire: Automated Candidate Screening")
+st.caption("AI-powered batch screening, domain classification, and semantic role alignment.")
 
 with st.sidebar:
-    st.header("⚙️ Matching Parameters")
-    top_k = st.slider("Top Recommendations Per Candidate", min_value=1, max_value=10, value=3)
-    min_score = st.slider("Minimum Match Threshold (%)", min_value=0, max_value=100, value=15, step=5)
-    st.divider()
-    st.caption("SmartHire ML Engine • TF-IDF + Classifier & Cosine Similarity")
+    st.header("⚙️ Screening Controls")
+    top_k = st.slider("Top Recommendations per Candidate", min_value=1, max_value=8, value=3)
+    min_score = st.slider("Minimum Match Threshold (%)", min_value=0, max_value=100, value=20, step=5)
+    st.markdown("---")
+    st.markdown("**Engine Details**")
+    st.write(f"• Active Positions: **{len(jobs)}**")
+    st.write("• Vectorizer: TF-IDF (1-2 ngrams)")
 
-col1, col2 = st.columns([1, 1.2], gap="large")
+col_left, col_right = st.columns([1, 1.3], gap="large")
 
-with col1:
-    st.subheader("📄 Candidate Upload")
+with col_left:
+    st.subheader("Upload Resumes")
     uploaded_files = st.file_uploader(
-        "Upload one or more resumes (PDF / DOCX)",
+        "Upload one or multiple resumes (PDF / DOCX)",
         type=["pdf", "docx"],
         accept_multiple_files=True
     )
-    
-    manual_input = st.text_area(
-        "Or paste resume text for a single candidate:",
-        height=140,
-        placeholder="Paste candidate skills, experience, or qualifications..."
-    )
+    run_btn = st.button("Run Batch Evaluation", type="primary", use_container_width=True)
 
-    run_btn = st.button("🚀 Screen All Resumes", type="primary", use_container_width=True)
-
-with col2:
-    st.subheader("📊 Screening Results")
+with col_right:
+    st.subheader("Screening Overview")
     if run_btn:
-        candidates = []
-        
-        if uploaded_files:
-            for f in uploaded_files:
-                txt = extract_text(f)
-                if txt:
-                    candidates.append({"name": f.name, "text": txt})
-                else:
-                    st.warning(f"Could not extract text from {f.name}")
-        elif manual_input.strip():
-            candidates.append({"name": "Manual Entry Candidate", "text": manual_input.strip()})
-
-        if not candidates:
-            st.warning("Please upload at least one resume file or paste text.")
+        if not uploaded_files:
+            st.warning("Please attach at least one PDF or DOCX resume to analyze.")
         else:
-            with st.spinner(f"Processing {len(candidates)} resume(s)..."):
-                batch_summary = []
-                
-                for cand in candidates:
-                    # 1. Classification & Confidence
-                    vec = clf_tfidf.transform([cand["text"]])
+            summary_records = []
+            detailed_results = []
+            
+            with st.spinner(f"Evaluating {len(uploaded_files)} resumes..."):
+                for f in uploaded_files:
+                    txt = extract_text(f)
+                    if not txt:
+                        continue
+                        
+                    vec = clf_tfidf.transform([txt])
                     pred_role = clf.predict(vec)[0]
-                    confidence = float(np.max(clf.predict_proba(vec)[0]) * 100) if hasattr(clf, "predict_proba") else None
                     
-                    # 2. Recommendations
-                    r_vec = rec_tfidf.transform([cand["text"]])
+                    r_vec = rec_tfidf.transform([txt])
                     sim_scores = cosine_similarity(r_vec, job_matrix).flatten()
                     top_idx = sim_scores.argsort()[::-1][:top_k]
                     
-                    matched_roles = []
-                    for idx in top_idx:
-                        pct = sim_scores[idx] * 100
-                        if pct >= min_score:
-                            title = jobs.iloc[idx].get("title", jobs.iloc[idx].get("job_title", "Position"))
-                            matched_roles.append(f"{title} ({pct:.1f}%)")
+                    best_match = ""
+                    best_pct = 0.0
+                    matches_list = []
                     
-                    batch_summary.append({
-                        "Candidate / File": cand["name"],
+                    for i, idx in enumerate(top_idx):
+                        pct = sim_scores[idx] * 100
+                        title = jobs.iloc[idx].get("title", jobs.iloc[idx].get("job_title", "Position"))
+                        if i == 0:
+                            best_match = title
+                            best_pct = pct
+                        if pct >= min_score:
+                            matches_list.append((title, pct, jobs.iloc[idx].get("category", "General")))
+                    
+                    skills = detect_skills(txt)
+                    
+                    summary_records.append({
+                        "Candidate": f.name,
                         "Predicted Domain": pred_role,
-                        "Confidence": f"{confidence:.1f}%" if confidence else "N/A",
-                        "Top Matches": ", ".join(matched_roles) if matched_roles else "No match above threshold"
+                        "Top Role": best_match,
+                        "Match Score": f"{best_pct:.1f}%",
+                        "Key Skills": ", ".join(skills) if skills else "N/A"
+                    })
+                    
+                    detailed_results.append({
+                        "name": f.name,
+                        "role": pred_role,
+                        "skills": skills,
+                        "matches": matches_list,
+                        "text": txt[:400] + "..."
                     })
 
-                st.markdown(f"### Processed **{len(candidates)}** Candidate(s)")
-                st.dataframe(pd.DataFrame(batch_summary), use_container_width=True)
+            df_summary = pd.DataFrame(summary_records)
+            st.dataframe(df_summary, use_container_width=True)
+            
+            csv_data = df_summary.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Export Screening Report to CSV",
+                data=csv_data,
+                file_name="smarthire_screening_summary.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+            st.markdown("### Candidate Breakdowns")
+            for cand in detailed_results:
+                with st.expander(f"📌 {cand['name']} — {cand['role']}"):
+                    st.write("**Identified Core Skills:**")
+                    if cand["skills"]:
+                        st.markdown(" ".join([f"`{s}`" for s in cand["skills"]]))
+                    else:
+                        st.caption("No standard keywords identified.")
+                    
+                    st.write("**Ranked Matches:**")
+                    for m_title, m_score, m_cat in cand["matches"]:
+                        st.progress(min(int(m_score), 100), text=f"{m_title} ({m_cat}) — {m_score:.1f}%")
+                    
+                    st.caption(f"Preview: {cand['text']}")
