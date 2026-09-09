@@ -20,12 +20,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 DATA_DIR = BASE_DIR / "data" / "processed"
 
+# Exact historical 20-skill pool
 CORE_SKILLS_POOL = [
-    "aws", "azure", "ci/cd", "c++", "c#", "deep learning", "docker", "git", 
-    "hadoop", "java", "jenkins", "jira", "kubernetes", "linux", 
-    "machine learning", "nlp", "nosql", "numpy", "pandas", "python", 
-    "pytorch", "pytest", "r", "react", "scikit-learn", "selenium", 
-    "spark", "spring boot", "sql", "statistics", "tableau", "tensorflow"
+    "aws", "deep learning", "docker", "git", "hadoop", "java", "kubernetes",
+    "machine learning", "nlp", "numpy", "pandas", "python", "pytorch",
+    "r", "spark", "spring boot", "sql", "statistics", "tableau", "tensorflow"
 ]
 MAX_EXPECTED_SKILLS = 26
 
@@ -77,7 +76,7 @@ with st.sidebar:
     upskill_threshold = st.slider("Upskill Pipeline Threshold (%)", 20, 60, 40, step=5)
     st.divider()
     st.write(f"• Indexed Database Roles: **{len(jobs)}**")
-    st.write(f"• Recognized Skill Library: **{len(CORE_SKILLS_POOL)} terms**")
+    st.write(f"• Active Skills Pool: **{len(CORE_SKILLS_POOL)} terms**")
 
 uploaded_files = st.file_uploader(
     "Upload Candidate Resumes (PDF / DOCX)",
@@ -109,14 +108,13 @@ if st.button("🚀 Generate Shortlist Decision Matrix", type="primary", use_cont
                     r_domain = classes[sorted_indices[1]] if len(classes) > 1 else "N/A"
                     r_cert = float(probs[sorted_indices[1]] * 100) if len(classes) > 1 else 0.0
                     
-                    # Shannon Entropy (base 2)
                     clean_probs = probs[probs > 0]
                     shannon_ent = float(entropy(clean_probs, base=2))
                 else:
                     pred = clf.predict(vec)[0]
                     p_domain, p_cert, r_domain, r_cert, shannon_ent = pred, 50.0, "N/A", 0.0, 1.0
 
-                # 2. Skill Extraction & Readiness Score
+                # 2. Skill Extraction & Readiness Score (Denominator = 26)
                 skills = extract_skills(txt)
                 skills_cnt = len(skills)
                 readiness_score = round(min((skills_cnt / MAX_EXPECTED_SKILLS) * 100, 100.0), 2)
@@ -131,21 +129,27 @@ if st.button("🚀 Generate Shortlist Decision Matrix", type="primary", use_cont
                 top_job_title = jobs.iloc[best_job_idx].get("title", jobs.iloc[best_job_idx].get("job_title", "General Role"))
                 job_match_score = round(float(sims[best_job_idx] * 100), 2)
 
-                # 4. Shortlist Probability & Action
-                shortlist_prob = round((0.45 * job_match_score) + (0.35 * readiness_score) + (0.20 * p_cert), 2)
+                # 4. Original Fitted Weights: 0.45*Certainty + 0.35*Readiness + 0.20*Match
+                shortlist_prob = round((0.45018 * p_cert) + (0.34998 * readiness_score) + (0.19993 * job_match_score), 2)
                 
+                # Candidate Tier based on readiness
+                if readiness_score >= 55.0:
+                    tier = "Tier 1 (High)"
+                elif readiness_score >= 35.0:
+                    tier = "Tier 2 (Mid)"
+                else:
+                    tier = "Tier 3 (Developing)"
+
+                # Decision Statuses
                 if shortlist_prob >= interview_threshold:
                     cand_status = "Interview Candidate"
                     rec_action = "Schedule Technical Screening"
-                    tier = "Tier 1 (High)"
                 elif shortlist_prob >= upskill_threshold:
                     cand_status = "Upskill Candidate"
                     rec_action = "Retain for Associate Pipeline"
-                    tier = "Tier 2 (Mid)" if readiness_score >= 40 else "Tier 3 (Developing)"
                 else:
                     cand_status = "Out of Scope"
                     rec_action = "Archive Profile"
-                    tier = "Tier 3 (Developing)"
 
                 matrix_rows.append({
                     "Filename": f.name,
@@ -179,7 +183,6 @@ if st.button("🚀 Generate Shortlist Decision Matrix", type="primary", use_cont
             st.subheader("📋 Decision Matrix Preview")
             st.dataframe(df_matrix, use_container_width=True)
 
-            # Generate downloadable Excel matching 'Shortlist_Rankings' sheet format
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
                 df_matrix.to_excel(writer, index=False, sheet_name="Shortlist_Rankings")
