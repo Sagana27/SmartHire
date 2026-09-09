@@ -1,123 +1,130 @@
 from pathlib import Path
-import os
+import streamlit as st
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.metrics.pairwise import cosine_similarity
+import pypdf
+import docx
 
+# Page configuration
+st.set_page_config(
+    page_title="SmartHire | Intelligent Resume Screener",
+    page_icon="💼",
+    layout="wide"
+)
+
+# Robust path handling
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
 DATA_DIR = BASE_DIR / "data" / "processed"
-import streamlit as st
-import pandas as pd
-import joblib
-from pathlib import Path
-import re
-from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(page_title="SmartHire | AI Recruitment Platform", layout="wide")
+def extract_text(file):
+    """Extract clean text from PDF or DOCX uploads."""
+    text = ""
+    if file.name.endswith(".pdf"):
+        reader = pypdf.PdfReader(file)
+        text = " ".join([page.extract_text() or "" for page in reader.pages])
+    elif file.name.endswith(".docx"):
+        doc = docx.Document(file)
+        text = " ".join([p.text for p in doc.paragraphs])
+    return text.strip()
 
-# Cached resource loaders
 @st.cache_resource
-def load_models_and_data():
-    models_dir = Path(__file__).resolve().parent.parent / "models"
-    if not models_dir.exists():
-        models_dir = Path(__file__).resolve().parent.parent / "models"
-
-    data_dir = Path(__file__).resolve().parent.parent / "data" / "processed"
-    if not data_dir.exists():
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "processed"
-
-    clf = joblib.load(models_dir / "classifier.pkl")
-    clf_tfidf = joblib.load(models_dir / "tfidf_vectorizer.pkl")
-    rec_tfidf = joblib.load(models_dir / "job_tfidf_vectorizer.pkl")
-
-    jobs = pd.read_csv(data_dir / "jobs_clean.csv")
+def load_resources():
+    clf = joblib.load(MODELS_DIR / "classifier.pkl")
+    clf_tfidf = joblib.load(MODELS_DIR / "clf_tfidf.pkl")
+    rec_tfidf = joblib.load(MODELS_DIR / "rec_tfidf.pkl")
+    
+    jobs = pd.read_csv(DATA_DIR / "jobs_clean.csv")
+    if "text" not in jobs.columns:
+        desc_col = next((c for c in ['job_description', 'clean_job_description', 'description'] if c in jobs.columns), jobs.columns[-1])
+        title_col = next((c for c in ['job_title', 'title'] if c in jobs.columns), jobs.columns[0])
+        jobs["text"] = jobs[title_col].astype(str) + " " + jobs[desc_col].astype(str)
+        
     job_matrix = rec_tfidf.transform(jobs["text"].fillna(""))
-
     return clf, clf_tfidf, rec_tfidf, jobs, job_matrix
 
-clf, clf_tfidf, rec_tfidf, jobs, job_matrix = load_models_and_data()
+try:
+    clf, clf_tfidf, rec_tfidf, jobs, job_matrix = load_resources()
+except Exception as e:
+    st.error(f"Error loading models or datasets: {e}")
+    st.stop()
 
-# Skill gap analysis taxonomy
-TECH_SKILLS = [
-    "python", "r", "sql", "machine learning", "deep learning", "nlp",
-    "data analysis", "pandas", "numpy", "scikit-learn", "tensorflow", "pytorch",
-    "tableau", "power bi", "matplotlib", "seaborn", "statistics", "aws",
-    "docker", "kubernetes", "git", "spark", "hadoop", "excel", "java", "spring boot"
-]
-
-# UI Header
-st.title("SmartHire: Intelligent Recruitment & Analytics")
+# Header
+st.title("💼 SmartHire: Intelligent Recruitment & Analytics")
 st.markdown("Automated resume domain classification, job matching, and candidate readiness scoring.")
 
-# Input layout
-col_input, col_config = st.columns([2, 1])
+# Sidebar Settings
+with st.sidebar:
+    st.header("⚙️ Matching Parameters")
+    top_k = st.slider("Number of Job Recommendations", min_value=1, max_value=15, value=5)
+    min_score = st.slider("Minimum Match Threshold (%)", min_value=0, max_value=100, value=15, step=5)
+    st.divider()
+    st.caption("SmartHire ML Engine • TF-IDF & MultinomialNB / Cosine Sim")
 
-with col_input:
-    resume_input = st.text_area(
-        "Paste Resume Text / Qualifications:",
-        height=220,
+# Main dual-column layout
+col1, col2 = st.columns([1.1, 1], gap="large")
+
+with col1:
+    st.subheader("📄 Candidate Profile Input")
+    uploaded_file = st.file_uploader("Upload candidate resume", type=["pdf", "docx"])
+    
+    manual_input = st.text_area(
+        "Or paste resume text / qualifications directly:",
+        height=200,
         placeholder="e.g., Data Scientist with experience in Python, SQL, Pandas, Scikit-Learn, and Machine Learning..."
     )
+    
+    resume_content = ""
+    if uploaded_file is not None:
+        resume_content = extract_text(uploaded_file)
+        st.success(f"Attached file: {uploaded_file.name} ({len(resume_content.split())} words parsed)")
+    elif manual_input.strip():
+        resume_content = manual_input.strip()
 
-with col_config:
-    st.subheader("Preferences")
-    top_n = st.slider("Number of Job Recommendations:", min_value=3, max_value=15, value=5)
-    target_role = st.text_input("Target Role for Skill Gap Analysis:", value="Data Scientist")
-    analyze_btn = st.button("Analyze Profile", type="primary", use_container_width=True)
+    run_btn = st.button("🚀 Analyze Profile & Match Jobs", type="primary", use_container_width=True)
 
-if analyze_btn and resume_input.strip():
-    clean_resume = resume_input.lower()
+with col2:
+    st.subheader("📊 Evaluation & Role Matches")
+    if run_btn:
+        if not resume_content:
+            st.warning("Please upload a resume file or paste qualifications to begin analysis.")
+        else:
+            with st.spinner("Processing text and running inference..."):
+                # Classification
+                text_vec = clf_tfidf.transform([resume_content])
+                predicted_role = clf.predict(text_vec)[0]
+                
+                # Confidence score
+                confidence = None
+                if hasattr(clf, "predict_proba"):
+                    probs = clf.predict_proba(text_vec)[0]
+                    confidence = float(np.max(probs) * 100)
 
-    # 1. Classification
-    vec_clf = clf_tfidf.transform([clean_resume])
-    predicted_cat = clf.predict(vec_clf)[0]
-    confidence = clf.predict_proba(vec_clf).max() * 100
+                # Metrics card
+                m1, m2 = st.columns(2)
+                m1.metric("Predicted Domain", predicted_role)
+                m2.metric("Classifier Confidence", f"{confidence:.1f}%" if confidence else "N/A")
 
-    st.divider()
+                # Cosine Similarity for Job Recommendation
+                r_vec = rec_tfidf.transform([resume_content])
+                similarity_scores = cosine_similarity(r_vec, job_matrix).flatten()
+                
+                top_indices = similarity_scores.argsort()[::-1][:top_k]
+                results = []
+                for idx in top_indices:
+                    sim_pct = similarity_scores[idx] * 100
+                    if sim_pct >= min_score:
+                        results.append({
+                            "Job Title": jobs.iloc[idx].get("title", jobs.iloc[idx].get("job_title", "Position")),
+                            "Category": jobs.iloc[idx].get("category", "General"),
+                            "Match Score": f"{sim_pct:.1f}%",
+                            "Description": jobs.iloc[idx].get("job_description", "")[:120] + "..."
+                        })
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Predicted Domain", predicted_cat)
-    m2.metric("Classification Confidence", f"{confidence:.2f}%")
-
-    # 2. Skill Gap Analysis
-    matched_role_jobs = jobs[jobs["title"].str.contains(target_role, case=False, na=False)]
-    if len(matched_role_jobs) > 0:
-        role_corpus = " ".join(matched_role_jobs["text"].dropna().str.lower())
-        demanded = [s for s in TECH_SKILLS if re.search(r"\b" + re.escape(s) + r"\b", role_corpus)]
-
-        present = [s for s in demanded if re.search(r"\b" + re.escape(s) + r"\b", f" {clean_resume} ")]
-        missing = [s for s in demanded if s not in present]
-        readiness = (len(present) / max(len(demanded), 1)) * 100
-        m3.metric("Role Readiness Score", f"{readiness:.1f}%")
-    else:
-        present, missing = [], []
-        m3.metric("Role Readiness Score", "N/A")
-
-    tab_rec, tab_gap = st.tabs(["Top Recommended Jobs", "Skill Gap Breakdown"])
-
-    with tab_rec:
-        vec_rec = rec_tfidf.transform([clean_resume])
-        sim_scores = cosine_similarity(vec_rec, job_matrix).flatten()
-        top_idx = sim_scores.argsort()[-top_n:][::-1]
-
-        results = jobs.iloc[top_idx][["title", "company", "location"]].copy()
-
-        # Handle null, None, nan, and empty strings
-        missing_values = ["None", "none", "nan", "NaN", "", "null", "Null"]
-        results["company"] = results["company"].fillna("Not Specified").replace(missing_values, "Not Specified")
-        results["location"] = results["location"].fillna("Remote / Unspecified").replace(missing_values, "Remote / Unspecified")
-        results["Match Score (%)"] = (sim_scores[top_idx] * 100).round(2)
-
-        st.dataframe(results.reset_index(drop=True), use_container_width=True)
-
-    with tab_gap:
-        col_present, col_missing = st.columns(2)
-        with col_present:
-            st.success(f"**Identified Competencies ({len(present)})**")
-            for skill in present:
-                st.write(f"- {skill.title()}")
-        with col_missing:
-            st.warning(f"**Recommended Skills to Acquire ({len(missing)})**")
-            for skill in missing:
-                st.write(f"- {skill.title()}")
-
-elif analyze_btn and not resume_input.strip():
-    st.error("Please paste resume text before running the analysis.")
+                st.markdown("### Top Matched Job Openings")
+                if results:
+                    st.dataframe(pd.DataFrame(results), use_container_width=True)
+                else:
+                    st.info("No available jobs exceeded your current minimum match score threshold.")
